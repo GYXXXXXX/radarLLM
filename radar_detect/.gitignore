@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data and outputs
+data/
+dataset/
+fmcw_traj_dataset_1000scenes/
+fmcw_traj_dataset_2000scenes/
+fmcw_traj_dataset_*scenes/
+fmcw_traj_dataset/
+datasets/
+outputs/
+runs/
+logs/
+checkpoints/
+weights/
+*.pth
+*.pt
+*.onnx
+*.ckpt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
