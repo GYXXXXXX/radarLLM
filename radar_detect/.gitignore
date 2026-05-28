@@ -25,6 +25,7 @@ fmcw_traj_dataset_1000scenes/
 fmcw_traj_dataset_2000scenes/
 fmcw_traj_dataset_*scenes/
 fmcw_traj_dataset/
+fmcw_tensor_cache_*scenes/
 datasets/
 outputs/
 runs/

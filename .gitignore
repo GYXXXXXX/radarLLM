@@ -1,0 +1,6 @@
+# Generated visualization artifacts
+scene_*_compare.png
+scene_*_compare.json
+metrics_curves*.png
+loss_curves*.png
+

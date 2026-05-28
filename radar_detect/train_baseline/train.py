@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parent))
@@ -27,6 +28,46 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from dataset import FmcwTrajectoryDataset
     from model import FmcwBaseline3DCNN
     from utils import append_jsonl, collect_scene_files, set_seed
+
+
+class SceneBatchSampler(Sampler[list[int]]):
+    """Shuffle scene order while keeping each scene's windows adjacent."""
+
+    def __init__(
+        self,
+        scene_index_groups: list[list[int]],
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        self.scene_index_groups = [list(indices) for indices in scene_index_groups if indices]
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.sample_count = sum(len(indices) for indices in self.scene_index_groups)
+
+    def __iter__(self):
+        order = list(range(len(self.scene_index_groups)))
+        if self.shuffle:
+            rng = random.Random(self.seed + self.epoch)
+            rng.shuffle(order)
+        self.epoch += 1
+
+        batch: list[int] = []
+        for group_idx in order:
+            for sample_idx in self.scene_index_groups[group_idx]:
+                batch.append(sample_idx)
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        return (self.sample_count + self.batch_size - 1) // self.batch_size
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,13 +85,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--lambda-state", type=float, default=1.0)
+    parser.add_argument("--label-smoothing", type=float, default=0.0)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--early-stop-min-delta", type=float, default=0.0)
+    parser.add_argument("--lr-patience", type=int, default=3)
+    parser.add_argument("--lr-factor", type=float, default=0.5)
     parser.add_argument("--train-ratio", type=float, default=0.8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--max-cache-scenes",
+        type=int,
+        default=32,
+        help="Maximum number of loaded scenes to keep in the per-process LRU cache; 0 disables caching.",
+    )
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=1,
+        help="Number of batches prefetched per DataLoader worker when num_workers > 0.",
+    )
+    parser.add_argument(
+        "--no-pin-memory",
+        action="store_true",
+        help="Disable pinned CPU memory for CUDA transfers.",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=10,
+        help="Print running progress every N batches; 0 disables progress output.",
+    )
+    parser.add_argument(
+        "--window-shuffle",
+        action="store_true",
+        help="Shuffle individual windows instead of scene-local batches. This is slower for .mat/HDF5 datasets.",
+    )
     parser.add_argument("--no-cache-scenes", action="store_true")
     parser.add_argument("--print-sample", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_cache_scenes < 0:
+        parser.error("--max-cache-scenes must be >= 0")
+    if args.prefetch_factor < 1:
+        parser.error("--prefetch-factor must be >= 1")
+    if args.log_every < 0:
+        parser.error("--log-every must be >= 0")
+    if args.label_smoothing < 0 or args.label_smoothing >= 1:
+        parser.error("--label-smoothing must be in [0, 1)")
+    if args.dropout < 0 or args.dropout >= 1:
+        parser.error("--dropout must be in [0, 1)")
+    if args.early_stop_patience < 0:
+        parser.error("--early-stop-patience must be >= 0")
+    if args.early_stop_min_delta < 0:
+        parser.error("--early-stop-min-delta must be >= 0")
+    if args.lr_patience < 0:
+        parser.error("--lr-patience must be >= 0")
+    if args.lr_factor <= 0 or args.lr_factor >= 1:
+        parser.error("--lr-factor must be in (0, 1)")
+    return args
 
 
 def choose_device(requested: str) -> torch.device:
@@ -93,14 +187,25 @@ def make_loader(
         max_targets=args.max_targets,
         iq_scale=args.iq_scale,
         cache_scenes=not args.no_cache_scenes,
+        max_cache_scenes=args.max_cache_scenes,
     )
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
+    loader_kwargs = {
+        "num_workers": args.num_workers,
+        "pin_memory": torch.cuda.is_available() and not args.no_pin_memory,
+    }
+    if shuffle and not args.window_shuffle:
+        loader_kwargs["batch_sampler"] = SceneBatchSampler(
+            dataset.scene_index_groups,
+            batch_size=args.batch_size,
+            shuffle=True,
+            seed=args.seed,
+        )
+    else:
+        loader_kwargs["batch_size"] = args.batch_size
+        loader_kwargs["shuffle"] = shuffle
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.prefetch_factor
+    return DataLoader(dataset, **loader_kwargs)
 
 
 def move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -119,11 +224,13 @@ def compute_loss(
     state_label: torch.Tensor,
     target_mask: torch.Tensor,
     lambda_state: float,
+    label_smoothing: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     bsz, max_targets, num_classes = class_logits.shape
     loss_cls = F.cross_entropy(
         class_logits.reshape(bsz * max_targets, num_classes),
         class_label.reshape(bsz * max_targets),
+        label_smoothing=label_smoothing,
     )
 
     raw_state_loss = F.smooth_l1_loss(state_pred, state_label, reduction="none")
@@ -246,18 +353,43 @@ def finalize_metrics(acc: dict[str, float]) -> dict[str, float]:
     }
 
 
+def print_progress(
+    phase: str,
+    epoch: int,
+    batch_index: int,
+    total_batches: int,
+    acc: dict[str, float],
+) -> None:
+    running_metrics = finalize_metrics(acc)
+    print(
+        f"phase={phase} "
+        f"epoch={epoch} "
+        f"batch={batch_index} "
+        f"total_batch={total_batches} "
+        f"loss_total={running_metrics['loss_total']:.6f} "
+        f"loss_cls={running_metrics['loss_cls']:.6f} "
+        f"loss_state={running_metrics['loss_state']:.6f}",
+        flush=True,
+    )
+
+
 def run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
     lambda_state: float,
+    label_smoothing: float,
     optimizer: torch.optim.Optimizer | None,
+    epoch: int,
+    phase: str,
+    log_every: int,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
     acc = empty_accumulator()
+    total_batches = len(loader)
 
-    for batch in loader:
+    for batch_index, batch in enumerate(loader, start=1):
         batch = move_batch(batch, device)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
@@ -271,6 +403,7 @@ def run_epoch(
                 batch["state_label"],
                 batch["target_mask"],
                 lambda_state,
+                label_smoothing,
             )
             if not torch.isfinite(loss_total):
                 raise FloatingPointError(
@@ -294,6 +427,15 @@ def run_epoch(
             batch["target_mask"],
         )
         add_batch_stats(acc, loss_total, loss_parts, metrics, batch_size=batch["x"].shape[0])
+
+        if log_every and (batch_index % log_every == 0 or batch_index == total_batches):
+            print_progress(
+                phase,
+                epoch,
+                batch_index,
+                total_batches,
+                acc,
+            )
 
     return finalize_metrics(acc)
 
@@ -337,11 +479,18 @@ def main() -> None:
         max_targets=args.max_targets,
         num_classes=args.num_classes,
         tout=args.tout,
+        dropout=args.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=args.lr_factor,
+        patience=args.lr_patience,
     )
 
     config_record = {
@@ -368,11 +517,33 @@ def main() -> None:
 
     print(json.dumps(config_record, ensure_ascii=False, indent=2))
     best_val = float("inf")
+    best_epoch = 0
+    epochs_since_best = 0
 
     try:
         for epoch in range(1, args.epochs + 1):
-            train_metrics = run_epoch(model, train_loader, device, args.lambda_state, optimizer)
-            val_metrics = run_epoch(model, val_loader, device, args.lambda_state, optimizer=None)
+            train_metrics = run_epoch(
+                model,
+                train_loader,
+                device,
+                args.lambda_state,
+                args.label_smoothing,
+                optimizer,
+                epoch=epoch,
+                phase="train",
+                log_every=args.log_every,
+            )
+            val_metrics = run_epoch(
+                model,
+                val_loader,
+                device,
+                args.lambda_state,
+                args.label_smoothing,
+                optimizer=None,
+                epoch=epoch,
+                phase="val",
+                log_every=args.log_every,
+            )
 
             record = {
                 "type": "epoch",
@@ -384,11 +555,28 @@ def main() -> None:
             print(json.dumps(record, ensure_ascii=False, allow_nan=False))
 
             save_checkpoint(run_dir / "last.pt", model, optimizer, epoch, args, val_metrics)
-            if val_metrics["loss_total"] < best_val:
-                best_val = val_metrics["loss_total"]
-                save_checkpoint(run_dir / "best.pt", model, optimizer, epoch, args, val_metrics)
+            current_val = val_metrics["loss_total"]
+            scheduler.step(current_val)
 
-        append_jsonl(log_path, {"type": "done", "best_val_loss": best_val})
+            if current_val < best_val - args.early_stop_min_delta:
+                best_val = current_val
+                best_epoch = epoch
+                epochs_since_best = 0
+                save_checkpoint(run_dir / "best.pt", model, optimizer, epoch, args, val_metrics)
+            else:
+                epochs_since_best += 1
+
+            if args.early_stop_patience and epochs_since_best >= args.early_stop_patience:
+                print(
+                    f"Early stopping at epoch {epoch} (best epoch {best_epoch}, best val {best_val:.6f}).",
+                    flush=True,
+                )
+                break
+
+        append_jsonl(
+            log_path,
+            {"type": "done", "best_val_loss": best_val, "best_epoch": best_epoch},
+        )
     except Exception as exc:
         append_jsonl(log_path, {"type": "error", "error": repr(exc)})
         raise

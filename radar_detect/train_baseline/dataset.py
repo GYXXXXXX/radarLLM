@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ class FmcwTrajectoryDataset(Dataset):
         max_targets: int = 4,
         iq_scale: float = 76.0,
         cache_scenes: bool = True,
+        max_cache_scenes: int | None = 32,
     ) -> None:
         self.scene_files = [Path(path) for path in scene_files]
         self.tin = int(tin)
@@ -35,17 +37,27 @@ class FmcwTrajectoryDataset(Dataset):
         self.stride = int(stride)
         self.max_targets = int(max_targets)
         self.iq_scale = float(iq_scale)
-        self.cache_scenes = bool(cache_scenes)
-        self._scene_cache: dict[Path, dict] = {}
+        self.max_cache_scenes = (
+            None if max_cache_scenes is None else int(max_cache_scenes)
+        )
+        if self.max_cache_scenes is not None and self.max_cache_scenes < 0:
+            raise ValueError("max_cache_scenes must be >= 0 or None.")
+        self.cache_scenes = bool(cache_scenes) and self.max_cache_scenes != 0
+        self._scene_cache: OrderedDict[Path, dict] = OrderedDict()
 
         self.samples: list[tuple[Path, int]] = []
+        self.scene_index_groups: list[list[int]] = []
         for scene_file in self.scene_files:
             nframes = read_scene_nframes(scene_file)
             last_start = nframes - self.tin - self.tout
             if last_start < 0:
                 continue
+            scene_indices: list[int] = []
             for start in range(0, last_start + 1, self.stride):
+                scene_indices.append(len(self.samples))
                 self.samples.append((scene_file, start))
+            if scene_indices:
+                self.scene_index_groups.append(scene_indices)
 
         if not self.samples:
             raise ValueError("No sliding-window samples were created. Check Tin/Tout/stride.")
@@ -57,9 +69,17 @@ class FmcwTrajectoryDataset(Dataset):
         if not self.cache_scenes:
             return load_scene(scene_file)
         scene = self._scene_cache.get(scene_file)
-        if scene is None:
-            scene = load_scene(scene_file)
-            self._scene_cache[scene_file] = scene
+        if scene is not None:
+            self._scene_cache.move_to_end(scene_file)
+            return scene
+
+        scene = load_scene(scene_file)
+        self._scene_cache[scene_file] = scene
+        if (
+            self.max_cache_scenes is not None
+            and len(self._scene_cache) > self.max_cache_scenes
+        ):
+            self._scene_cache.popitem(last=False)
         return scene
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | str | int]:

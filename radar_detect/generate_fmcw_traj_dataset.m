@@ -97,7 +97,7 @@ end
 function p = defaultParams()
 % 参数设置
 
-p.outputDir = 'fmcw_traj_dataset_1000scenes';
+p.outputDir = 'fmcw_traj_dataset_2000scenes';
 p.numScenes = 2000;
 p.baseSeed = 1202;
 p.cleanOutputDir = true;
