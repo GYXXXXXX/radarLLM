@@ -19,3 +19,4 @@ detect_intention/train_intention/runs/
 # Secrets
 .env
 *.env
+start_qwen_radarbackend.ps1

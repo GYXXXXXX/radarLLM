@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>认知雷达闭环仿真可视化系统</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <span class="brand-mark"></span>
+          <div>
+            <h1>认知雷达闭环仿真可视化系统</h1>
+            <p>MATLAB IQ 仿真序列 + Transformer 感知 + 大模型态势推理 + 雷达波束控制</p>
+          </div>
+        </div>
+        <div class="run-strip" aria-label="仿真状态">
+          <span class="status-pill" id="runStatus">RUNNING</span>
+          <span>后端 <strong id="backendStatusValue">LOCAL</strong></span>
+          <span>LLM <strong id="llmStatusValue">rule</strong></span>
+          <span>周期 <strong id="cycleValue">0000</strong></span>
+          <span>时标 <strong id="timeValue">0.0s</strong></span>
+          <span>闭环 <strong id="loopRateValue">4.0Hz</strong></span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="side-panel controls-panel">
+          <section class="panel-section">
+            <div class="section-title">
+              <span>数据视图</span>
+              <span class="section-kicker">VIEW</span>
+            </div>
+            <div class="segmented" id="radarTabs" role="tablist" aria-label="选择雷达数据视图">
+              <button class="segment-button is-active" type="button" data-radar="shore">岸基</button>
+              <button class="segment-button" type="button" data-radar="v01">舰01</button>
+              <button class="segment-button" type="button" data-radar="v02">舰02</button>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">
+              <span>跟踪目标</span>
+              <span class="section-kicker">TARGET</span>
+            </div>
+            <div class="target-switch" id="targetTabs" aria-label="选择跟踪目标">
+              <button class="target-button target-red is-active" type="button" data-target="T-01">
+                <span class="target-dot"></span>
+                T-01
+              </button>
+              <button class="target-button target-blue" type="button" data-target="T-02">
+                <span class="target-dot"></span>
+                T-02
+              </button>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">
+              <span>运行控制</span>
+              <span class="section-kicker">RUN</span>
+            </div>
+            <div class="icon-row">
+              <button class="tool-button" id="playPauseBtn" type="button" title="暂停">
+                <span id="playPauseIcon">||</span>
+                <span id="playPauseText">暂停</span>
+              </button>
+              <button class="tool-button secondary" id="resetBtn" type="button" title="复位">
+                <span>↺</span>
+                <span>复位</span>
+              </button>
+            </div>
+            <label class="range-control">
+              <span>仿真速度</span>
+              <input id="speedRange" type="range" min="0.35" max="3.0" value="1.0" step="0.05" />
+              <output id="speedValue">1.00x</output>
+            </label>
+            <label class="range-control">
+              <span>海杂波</span>
+              <input id="clutterRange" type="range" min="0.05" max="0.70" value="0.26" step="0.01" />
+              <output id="clutterValue">0.26</output>
+            </label>
+            <label class="range-control">
+              <span>感知扰动</span>
+              <input id="uncertaintyRange" type="range" min="0.00" max="0.65" value="0.22" step="0.01" />
+              <output id="uncertaintyValue">0.22</output>
+            </label>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">
+              <span>显示层</span>
+              <span class="section-kicker">MAP</span>
+            </div>
+            <div class="toggle-stack">
+              <label class="toggle-row">
+                <input id="showBeams" type="checkbox" checked />
+                <span>波束</span>
+              </label>
+              <label class="toggle-row">
+                <input id="showTracks" type="checkbox" checked />
+                <span>航迹</span>
+              </label>
+              <label class="toggle-row">
+                <input id="showGates" type="checkbox" checked />
+                <span>距离门</span>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel-section compact-section">
+            <div class="section-title">
+              <span>仿真链路</span>
+              <span class="section-kicker">LOOP</span>
+            </div>
+            <ol class="loop-list" id="loopList">
+              <li>舰船位置更新</li>
+              <li>目标位置更新</li>
+              <li>三雷达 IQ 生成</li>
+              <li>Transformer 感知</li>
+              <li>态势推理</li>
+              <li>约束控制</li>
+              <li>波束刷新</li>
+            </ol>
+          </section>
+        </aside>
+
+        <section class="map-stage">
+          <canvas id="sceneCanvas" aria-label="海上雷达闭环仿真地图"></canvas>
+          <div class="map-hud top-left">
+            <span class="legend-item shore"><i></i>岸基雷达</span>
+            <span class="legend-item v01"><i></i>V-01</span>
+            <span class="legend-item v02"><i></i>V-02</span>
+            <span class="legend-item t01"><i></i>T-01</span>
+            <span class="legend-item t02"><i></i>T-02</span>
+          </div>
+          <div class="map-hud top-right" id="mapFocus">TRACK T-01</div>
+          <div class="backend-overlay" id="backendOverlay">
+            <strong>后端未连接</strong>
+            <span>请运行 start_qwen_radarbackend.ps1，然后刷新或等待自动重连。</span>
+          </div>
+        </section>
+
+        <aside class="side-panel telemetry-panel">
+          <section class="panel-section selected-radar">
+            <div class="section-title">
+              <span id="selectedRadarName">岸基雷达</span>
+              <span class="section-kicker" id="selectedRadarRole">广域发现</span>
+            </div>
+            <div class="metric-grid">
+              <div class="metric">
+                <span>方位</span>
+                <strong id="bearingMetric">0.0°</strong>
+              </div>
+              <div class="metric">
+                <span>距离</span>
+                <strong id="rangeMetric">0.0 km</strong>
+              </div>
+              <div class="metric">
+                <span>置信度</span>
+                <strong id="confidenceMetric">0.00</strong>
+              </div>
+              <div class="metric">
+                <span>SNR</span>
+                <strong id="snrMetric">0.0 dB</strong>
+              </div>
+              <div class="metric">
+                <span>波束宽度</span>
+                <strong id="beamWidthMetric">0.0°</strong>
+              </div>
+              <div class="metric">
+                <span>驻留时间</span>
+                <strong id="dwellMetric">0 ms</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">
+              <span>Transformer 感知</span>
+              <span class="section-kicker">PERCEPTION</span>
+            </div>
+            <div class="readout-list">
+              <div>
+                <span>估计方位</span>
+                <strong id="estimatedBearing">0.0°</strong>
+              </div>
+              <div>
+                <span>估计距离</span>
+                <strong id="estimatedRange">0.0 km</strong>
+              </div>
+              <div>
+                <span>多普勒</span>
+                <strong id="dopplerMetric">0.0 m/s</strong>
+              </div>
+              <div>
+                <span>一致性</span>
+                <strong id="fusionMetric">0.00</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-title">
+              <span>大模型态势推理</span>
+              <span class="section-kicker">REASONING</span>
+            </div>
+            <div class="reasoning-card">
+              <div class="reasoning-row">
+                <span>意图</span>
+                <strong id="intentMetric">approach</strong>
+              </div>
+              <div class="reasoning-row">
+                <span>威胁</span>
+                <strong id="threatMetric">guarded</strong>
+              </div>
+              <p id="llmNarrative">等待闭环状态刷新。</p>
+              <div class="controller-line">
+                <span>控制建议</span>
+                <strong id="controlMetric">acquire</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel-section controller-impact-section">
+            <div class="section-title">
+              <span>控制器</span>
+              <span class="section-kicker">CONTROL</span>
+            </div>
+            <div
+              class="controller-impact-list"
+              id="controllerImpactList"
+              aria-label="控制器影响三部雷达的数值"
+            ></div>
+          </section>
+        </aside>
+      </main>
+
+      <section class="fleet-strip" aria-label="三雷达协同状态">
+        <article class="radar-card" data-card="shore">
+          <div>
+            <span class="card-kicker">岸基雷达</span>
+            <strong id="cardShoreTitle">目标 T-01</strong>
+          </div>
+          <div class="card-values">
+            <span id="cardShoreBeam">000° / 00°</span>
+            <span id="cardShoreConfidence">0.00</span>
+          </div>
+          <div class="bar-track"><span id="cardShoreBar"></span></div>
+        </article>
+        <article class="radar-card" data-card="v01">
+          <div>
+            <span class="card-kicker">舰 01 雷达</span>
+            <strong id="cardV01Title">目标 T-01</strong>
+          </div>
+          <div class="card-values">
+            <span id="cardV01Beam">000° / 00°</span>
+            <span id="cardV01Confidence">0.00</span>
+          </div>
+          <div class="bar-track"><span id="cardV01Bar"></span></div>
+        </article>
+        <article class="radar-card" data-card="v02">
+          <div>
+            <span class="card-kicker">舰 02 雷达</span>
+            <strong id="cardV02Title">目标 T-01</strong>
+          </div>
+          <div class="card-values">
+            <span id="cardV02Beam">000° / 00°</span>
+            <span id="cardV02Confidence">0.00</span>
+          </div>
+          <div class="bar-track"><span id="cardV02Bar"></span></div>
+        </article>
+        <article class="event-card">
+          <span class="card-kicker">事件流</span>
+          <div id="eventLog" class="event-log"></div>
+        </article>
+      </section>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
